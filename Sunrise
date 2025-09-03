@@ -90,8 +90,7 @@ blueprint:
         boolean:
 
 variables:
-  fade_minutes: !input fade_duration
-  fade_seconds: "{{ fade_minutes * 60 }}"
+  fade_duration_minutes: !input fade_duration
   min_bright: !input min_brightness
   max_bright: !input max_brightness
   min_temp: !input min_color_temp
@@ -102,18 +101,7 @@ variables:
 trigger:
   - platform: time
     at: !input alarm_time
-    id: "alarm_time"
-  - platform: template
-    value_template: >
-      {% set alarm_time = states('input_datetime.alarm_time') if 'input_datetime.alarm_time' in states else (trigger.now.strftime('%H:%M') if trigger is defined else now().strftime('%H:%M')) %}
-      {% set fade_mins = fade_minutes %}
-      {% set alarm_hour = alarm_time.split(':')[0] | int %}
-      {% set alarm_minute = alarm_time.split(':')[1] | int %}
-      {% set fade_start = (alarm_hour * 60 + alarm_minute - fade_mins) %}
-      {% set fade_start_hour = (fade_start // 60) % 24 %}
-      {% set fade_start_minute = fade_start % 60 %}
-      {{ now().strftime('%H:%M') == '{:02d}:{:02d}'.format(fade_start_hour, fade_start_minute) }}
-    id: "fade_start"
+    id: "start_fade"
 
 condition:
   - condition: or
@@ -143,44 +131,60 @@ condition:
         value_template: "{{ workday_entity == {} and not weekdays_enabled }}"
 
 action:
-  - choose:
-      # Fade start trigger
-      - conditions:
-          - condition: trigger
-            id: "fade_start"
-        sequence:
-          - service: light.turn_on
-            target: !input target_lights
-            data:
-              brightness_pct: "{{ min_bright }}"
-              color_temp: "{{ min_temp }}"
-              transition: 1
-          
-          # Gradual fade over the specified duration
-          - repeat:
-              count: "{{ fade_minutes }}"
-              sequence:
-                - delay: "00:01:00"
-                - variables:
-                    progress: "{{ repeat.index / fade_minutes }}"
-                    current_brightness: "{{ min_bright + (max_bright - min_bright) * progress }}"
-                    current_temp: "{{ min_temp + (max_temp - min_temp) * progress }}"
-                - service: light.turn_on
-                  target: !input target_lights
-                  data:
-                    brightness_pct: "{{ current_brightness | round(0) }}"
-                    color_temp: "{{ current_temp | round(0) }}"
-                    transition: 60
+  # Calculate fade start time (trigger time minus fade duration)
+  - variables:
+      fade_start_timestamp: >
+        {% set trigger_time = trigger.now %}
+        {% set fade_minutes_ago = trigger_time - timedelta(minutes=fade_duration_minutes) %}
+        {{ fade_minutes_ago }}
       
-      # Alarm time trigger (final state)
-      - conditions:
-          - condition: trigger
-            id: "alarm_time"
-        sequence:
-          - service: light.turn_on
-            target: !input target_lights
-            data:
-              brightness_pct: "{{ max_bright }}"
-              color_temp_kelvin: "{{ max_temp }}"
+  # Turn on lights at minimum settings to start
+  - service: light.turn_on
+    target: !input target_lights
+    data:
+      brightness_pct: "{{ min_bright }}"
+      color_temp_kelvin: "{{ min_temp }}"
+  
+  # Wait until it's actually time to start the fade
+  - delay:
+      seconds: >
+        {% set now_time = now() %}
+        {% set fade_start = now_time - timedelta(minutes=fade_duration_minutes) %}
+        {% if now_time < fade_start %}
+          {{ (fade_start - now_time).total_seconds() }}
+        {% else %}
+          0
+        {% endif %}
+  
+  # Perform the gradual fade with 30-second steps
+  - repeat:
+      count: "{{ (fade_duration_minutes * 2) | int }}"
+      sequence:
+        - variables:
+            step_number: "{{ repeat.index }}"
+            total_steps: "{{ (fade_duration_minutes * 2) | int }}"
+            progress: "{{ step_number / total_steps }}"
+            # Use quadratic curve for more natural progression
+            smooth_progress: "{{ progress ** 2 }}"
+            current_brightness: "{{ min_bright + (max_bright - min_bright) * smooth_progress }}"
+            current_temp: "{{ min_temp + (max_temp - min_temp) * smooth_progress }}"
+        
+        - service: light.turn_on
+          target: !input target_lights
+          data:
+            brightness_pct: "{{ current_brightness | round(1) }}"
+            color_temp_kelvin: "{{ current_temp | round(0) }}"
+        
+        # Wait 30 seconds between steps (except on last step)
+        - condition: template
+          value_template: "{{ repeat.index < total_steps }}"
+        - delay: "00:00:30"
+  
+  # Ensure final state is set correctly
+  - service: light.turn_on
+    target: !input target_lights
+    data:
+      brightness_pct: "{{ max_bright }}"
+      color_temp_kelvin: "{{ max_temp }}"
 
-mode: restart
+mode: single
