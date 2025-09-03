@@ -186,5 +186,6 @@ action:
     data:
       brightness_pct: "{{ max_bright }}"
       color_temp_kelvin: "{{ max_temp }}"
+      transition: 30
 
 mode: single
