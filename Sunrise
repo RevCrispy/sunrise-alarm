@@ -181,7 +181,6 @@ action:
             target: !input target_lights
             data:
               brightness_pct: "{{ max_bright }}"
-              color_temp: "{{ max_temp }}"
-              transition: 60
+              color_temp_kelvin: "{{ max_temp }}"
 
 mode: restart
